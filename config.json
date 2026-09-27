@@ -1,0 +1,17 @@
+{
+    "hardware": {
+        "camera_source": 0,
+        "camera_resolution": [640, 480],
+        "alert_method": "speaker",
+        "audio_file": "assets/alarm.wav"
+    },
+    "thresholds": {
+        "ear_default": 0.22,
+        "mar_default": 0.5,
+        "pitch_default": -15.0,
+        "sleep_time": 2.0,
+        "nod_time": 1.5,
+        "yawn_time": 2.0,
+        "calibration_time": 5.0
+    }
+}
