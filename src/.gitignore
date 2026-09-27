@@ -1,0 +1,7 @@
+# Bỏ qua các thư mục/file rác do Python tự sinh ra khi chạy
+__pycache__/
+*.py[cod]
+
+# Bỏ qua các file hệ thống của Windows/Mac
+.DS_Store
+Thumbs.db
