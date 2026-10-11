@@ -1,17 +1,39 @@
 {
     "hardware": {
-        "camera_source": 0,
+        "camera_source": 1,
         "camera_resolution": [640, 480],
+        "target_fps": 30,
+        "camera_rotation": 0,
+        "flip_horizontal": false,
         "alert_method": "speaker",
         "audio_file": "assets/alarm.wav"
     },
+    "model": {
+        "backend": "mediapipe",
+        "unified_weights": "models/dms_unified.pt",
+        "eye_classifier_weights": "models/eye_classifier.pt",
+        "imgsz": 416,
+        "conf_threshold": 0.5,
+        "kpt_conf_threshold": 0.3
+    },
+    "preprocessing": {
+        "dip_mode": "auto",
+        "low_light_threshold": 85.0,
+        "glare_threshold": 195.0,
+        "smoothing_window": 5
+    },
     "thresholds": {
         "ear_default": 0.22,
-        "mar_default": 0.5,
+        "mar_default": 0.50,
         "pitch_default": -15.0,
+        "yaw_default": 28.0,
         "sleep_time": 2.0,
         "nod_time": 1.5,
         "yawn_time": 2.0,
-        "calibration_time": 5.0
+        "distraction_time": 2.0,
+        "calibration_time": 5.0,
+        "perclos_window": 60.0,
+        "perclos_warn_threshold": 0.22,
+        "perclos_threshold": 0.40
     }
 }

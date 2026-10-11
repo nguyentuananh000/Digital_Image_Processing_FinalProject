@@ -1,0 +1,23 @@
+# Bỏ qua các thư mục/file rác do Python tự sinh ra khi chạy
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Môi trường ảo
+.venv/
+venv/
+env/
+
+# Thư mục dữ liệu lớn & kết quả huấn luyện tạm thời
+dataset/
+runs/
+*.mp4
+*.avi
+*.xml
+Bao_Cao_Do_An_DMS.docx
+
+# Bỏ qua các file hệ thống của Windows/Mac/IDE
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
