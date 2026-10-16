@@ -11,13 +11,16 @@ env/
 # Thư mục dữ liệu lớn & kết quả huấn luyện tạm thời
 dataset/
 runs/
+snapshots/
 *.mp4
 *.avi
 *.xml
-Bao_Cao_Do_An_DMS.docx
 
 # Bỏ qua các file hệ thống của Windows/Mac/IDE
 .DS_Store
 Thumbs.db
 .idea/
 .vscode/
+
+.agents/
+report/

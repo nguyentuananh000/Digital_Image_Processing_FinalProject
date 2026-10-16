@@ -183,3 +183,64 @@ class OneEuroFilter1D:
         self.dx_prev = dx_hat
         self.t_prev = float(t)
         return x_hat
+
+
+class PointsOneEuroFilter:
+    """
+    Bộ lọc thích nghi One-Euro Filter 2D đa chiều cho mảng điểm mốc (Facial Landmarks):
+    - Khi khuôn mặt đứng im (vận tốc ~ 0): Giảm tần số cắt để triệt tiêu hoàn toàn rung lắc (jitter) từ camera.
+    - Khi khuôn mặt cử động / chớp mắt nhanh: Tự động mở rộng dải tần theo vận tốc để phản ứng tức thì (0ms lag).
+    """
+
+    def __init__(self, min_cutoff: float = 0.7, beta: float = 0.04, d_cutoff: float = 1.0, max_jump: float = 80.0):
+        self.min_cutoff = float(min_cutoff)
+        self.beta = float(beta)
+        self.d_cutoff = float(d_cutoff)
+        self.max_jump = float(max_jump)
+        self.x_prev = None
+        self.dx_prev = None
+        self.t_prev = None
+
+    def reset(self):
+        self.x_prev = None
+        self.dx_prev = None
+        self.t_prev = None
+
+    def filter(self, x: np.ndarray, t: float) -> np.ndarray:
+        if x is None:
+            return None
+        x = np.asarray(x, dtype=np.float32)
+
+        if self.t_prev is None or self.x_prev is None or self.x_prev.shape != x.shape:
+            self.x_prev = x.copy()
+            self.dx_prev = np.zeros_like(x)
+            self.t_prev = float(t)
+            return self.x_prev.copy()
+
+        dt = max(1e-4, float(t - self.t_prev))
+
+        # Nếu khoảng cách nhảy vọt quá lớn (> max_jump px, e.g. đổi vị trí mặt đột ngột), reset bộ lọc
+        if (self.max_jump > 0 and np.max(np.abs(x - self.x_prev)) > self.max_jump) or dt > 0.5:
+            self.reset()
+            return self.filter(x, t)
+
+        # 1. Ước lượng đạo hàm vận tốc (Derivative)
+        r_d = 2.0 * math.pi * self.d_cutoff * dt
+        a_d = r_d / (r_d + 1.0)
+        dx = (x - self.x_prev) / dt
+        dx_hat = a_d * dx + (1.0 - a_d) * self.dx_prev
+
+        # 2. Vận tốc dịch chuyển của từng điểm (Euclidean norm)
+        speed = np.linalg.norm(dx_hat, axis=-1, keepdims=True)
+
+        # 3. Tần số cắt thích nghi: tăng vọt khi vận tốc cao (chớp mắt, quay đầu, nói chuyện)
+        cutoff = self.min_cutoff + self.beta * speed
+        r = 2.0 * math.pi * cutoff * dt
+        a = r / (r + 1.0)
+
+        # 4. Làm mượt điểm mốc
+        x_hat = a * x + (1.0 - a) * self.x_prev
+        self.x_prev = x_hat
+        self.dx_prev = dx_hat
+        self.t_prev = float(t)
+        return x_hat

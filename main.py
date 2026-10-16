@@ -6,12 +6,22 @@ import sys
 import time
 from collections import deque
 
+import importlib.util
+
+if sys.platform == "win32":
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+        sys.stderr.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+
 # Tự động chuyển sang môi trường Python đã cài đầy đủ thư viện (Python 3.13 / .venv)
-# nếu người dùng vô tình gọi bằng Python mặc định mới cài (ví dụ C:\Python314 chưa có cv2/ultralytics)
-try:
-    import cv2
-    import ultralytics  # noqa: F401
-except ModuleNotFoundError:
+# Dùng find_spec thay vì import trực tiếp để tiết kiệm 1.5s khởi động
+_has_deps = (
+    importlib.util.find_spec("cv2") is not None
+    and importlib.util.find_spec("customtkinter") is not None
+)
+if not _has_deps:
     _CANDIDATE_PYTHONS = [
         os.path.expanduser(r"~\AppData\Local\Programs\Python\Python313\python.exe"),
         os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".venv", "Scripts", "python.exe")),
@@ -20,15 +30,11 @@ except ModuleNotFoundError:
     for _py_path in _CANDIDATE_PYTHONS:
         if os.path.exists(_py_path) and os.path.normcase(_py_path) != os.path.normcase(sys.executable):
             print(f"[Env] Chuyen tu {sys.executable} sang moi truong da cai thu vien: {_py_path}")
-            sys.exit(subprocess.call([_py_path, *sys.argv]))
-    raise
+            env = os.environ.copy()
+            env["PYTHONIOENCODING"] = "utf-8"
+            sys.exit(subprocess.call([_py_path, *sys.argv], env=env))
+    raise ModuleNotFoundError("Chua cai dat day du thu vien (cv2, customtkinter). Vui long cai dat truoc khi chay.")
 
-from src.core.camera import WebcamStream
-from src.core.alert_system import AlertSystem
-from src.core.image_processing import AdaptiveImageProcessor
-from src.core.detector import FaceLandmarkDetector, AsyncDetectorWorker
-from src.core.tracker_logic import DrowsinessTracker
-from src.ui.visualizer import DMSVisualizer
 
 
 AVAILABLE_MODES = ["mediapipe", "unified", "compare"]
@@ -41,7 +47,9 @@ def load_config(config_path: str) -> dict:
         return json.load(f)
 
 
-def build_detector(mode: str, model_cfg: dict, root_dir: str) -> FaceLandmarkDetector:
+def build_detector(mode: str, model_cfg: dict, root_dir: str):
+    from src.core.detector import FaceLandmarkDetector
+
     unified_weights = os.path.join(root_dir, model_cfg.get("unified_weights", "models/dms_unified.pt"))
     eye_weights = os.path.join(root_dir, model_cfg.get("eye_classifier_weights", "models/eye_classifier.pt"))
     conf_thresh = float(model_cfg.get("conf_threshold", 0.5))
@@ -104,6 +112,13 @@ def parse_args():
         action="store_true",
         help="Bỏ qua bước hiệu chuẩn 5 giây đầu, dùng luôn ngưỡng mặc định trong config.json",
     )
+    parser.add_argument(
+        "--cli",
+        "--no-gui",
+        dest="cli",
+        action="store_true",
+        help="Chạy ở chế độ giao diện OpenCV truyền thống (mặc định khởi chạy Dashboard CustomTkinter trực quan)",
+    )
     return parser.parse_args()
 
 
@@ -111,6 +126,13 @@ def main():
     args = parse_args()
     root_dir = os.path.dirname(os.path.abspath(__file__))
     config_path = os.path.join(root_dir, "config.json")
+
+    # Mặc định khởi chạy Giao diện đồ họa trực quan (CustomTkinter Dashboard)
+    # trừ khi người dùng chạy với tham số --cli hoặc --no-gui
+    if not args.cli:
+        from src.ui.app_gui import launch_gui
+        launch_gui(config_path)
+        return
 
     try:
         config = load_config(config_path)
@@ -160,6 +182,13 @@ def main():
         current_mode = "unified"
 
     # 2. Khởi tạo các mô-đun cốt lõi (3 luồng độc lập: Camera + AI Worker + UI 30 FPS)
+    from src.core.camera import WebcamStream
+    from src.core.alert_system import AlertSystem
+    from src.core.image_processing import AdaptiveImageProcessor
+    from src.core.detector import AsyncDetectorWorker
+    from src.core.tracker_logic import DrowsinessTracker
+    from src.ui.visualizer import DMSVisualizer
+
     alert = AlertSystem(method=alert_method, sound_path=audio_file)
     img_processor = AdaptiveImageProcessor(
         mode=dip_mode,

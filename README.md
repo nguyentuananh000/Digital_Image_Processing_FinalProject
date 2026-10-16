@@ -24,15 +24,16 @@ project/
 │   │   ├── tracker_logic.py       # Hiệu chuẩn cá nhân 5s, bù góc cúi đầu Pitch, phân biệt Nói chuyện vs Ngáp, PERCLOS
 │   │   └── alert_system.py        # Cảnh báo âm thanh đa cấp (Level 1: Beep 880Hz nhắc nhở, Level 2: Còi báo động)
 │   └── ui/
+│       ├── app_gui.py             # Giao diện Dashboard hiện đại (CustomTkinter) với đầy đủ thanh điều khiển, đồng hồ đo & nhật ký
 │       └── visualizer.py          # Giao diện HUD trực quan & Bảng đối chiếu trực tiếp (Unified vs MediaPipe)
 ├── tools/
 │   ├── data_prep/                 # Các công cụ trích xuất frame, gán nhãn tự động và tăng cường dữ liệu
 │   ├── train_eye_classifier.py    # Huấn luyện mạng CNN phân loại mắt trên bộ MRL Eye Dataset
 │   └── train_unified_yolo.py      # Làm sạch nhãn mí mắt và huấn luyện gộp YOLOv8-Pose (YawDD + DDD)
+├── Bao_Cao_Do_An_DMS.docx         # Bản Báo cáo Đồ án Toàn diện xuất bản file Word (10 chương chuẩn học thuật)
 ├── config.json                    # Cấu hình trung tâm của toàn hệ thống
-├── main.py                        # Điểm khởi chạy duy nhất của chương trình
+├── main.py                        # Điểm khởi chạy duy nhất của chương trình (Tự động mở Dashboard GUI)
 └── requirements.txt               # Danh sách thư viện phụ thuộc
-```
 
 ---
 
@@ -47,19 +48,34 @@ project/
 
 ---
 
-## 3. Hướng dẫn Chạy & Phím tắt
+## 3. Giao diện Người dùng Đồ họa (Modern Dashboard) & Hướng dẫn Sử dụng
 
-```powershell
-python main.py
-```
+### 3.1 Khởi chạy Chương trình
 
-### Phím tắt trực tiếp trên màn hình:
-* **`[M]`**: Chuyển đổi tức thì giữa 3 chế độ:
-  1. `MEDIAPIPE` (Mặc định: `MediaPipe 3D + EyeCNN + YOLO-Rescue`)
-  2. `UNIFIED` (`Model YOLOv8-Pose hợp nhất dms_unified.pt + EyeCNN`)
-  3. `COMPARE` (**Chế độ Đối chiếu Trực tiếp** 2 mô hình trên cùng một màn hình)
-* **`[V]`**: Đổi nhanh giữa Camera Laptop (`0`) và DroidCam Điện thoại (`1`)
-* **`[R]`**: Xoay khung hình Camera (`0°` $\rightarrow$ `90°` $\rightarrow$ `180°` $\rightarrow$ `270°`)
-* **`[C]`**: Hiệu chuẩn lại (Auto-Calibration 5 giây) theo khuôn mặt người lái
-* **`[P]`**: Đổi chế độ Tiền xử lý Ảnh số (`AUTO` $\rightarrow$ `CLAHE` $\rightarrow$ `OFF`)
-* **`[Q]` / `ESC`**: Thoát chương trình
+* **Chạy giao diện đồ họa trực quan (Khuyên dùng):**
+  ```powershell
+  python main.py
+  ```
+* **Chạy chế độ dòng lệnh OpenCV truyền thống:**
+  ```powershell
+  python main.py --cli
+  ```
+
+### 3.2 Các Tính năng trên Dashboard Điều khiển:
+* **Khung Video Trực tiếp:** Hiển thị luồng camera 30 FPS mượt mà cùng lớp phủ nhận diện khuôn mặt, các điểm mốc mắt/miệng và HUD trạng thái.
+* **Thanh tác vụ nhanh (Quick Action Bar):**
+  * `Tạm dừng / Tiếp tục`: Tạm dừng hệ thống bất kỳ lúc nào.
+  * `Hiệu chuẩn lại`: Bật chu kỳ 5 giây học ngưỡng sinh trắc riêng cho khuôn mặt tài xế.
+  * `Xoay camera`: Xoay khung hình 0°, 90°, 180°, 270° phù hợp khi dùng DroidCam điện thoại.
+  * `Tắt âm`: Bật/Tắt chuông báo động khi đang thử nghiệm trong phòng yên tĩnh.
+  * `Chụp ảnh`: Lưu ảnh chứng cứ khi phát hiện ngủ gật/ngáp vào thư mục `snapshots/`.
+* **Cài đặt Thiết bị & AI (Device & AI Settings):**
+  * Danh sách chọn Camera: Webcam Laptop (0), DroidCam Điện thoại (1), hoặc URL IP Cam.
+  * Chuyển đổi Model AI tức thì: `MediaPipe 3D (Khuyên dùng)`, `Unified YOLO`, hoặc `Đối chiếu So sánh (Compare)`.
+  * Bộ lọc Tiền xử lý Ảnh số: `Tự động thích nghi (Auto)`, `Bật CLAHE`, hoặc `Tắt lọc`.
+* **Thanh đo Sinh trắc Thời gian thực (Live Biometrics Meters):**
+  * Đồng hồ chỉ số **EAR** (Eye Aspect Ratio), **EyeCNN** (Xác suất mắt nhắm), **MAR** (Mouth Aspect Ratio), và **PERCLOS** (% thời gian nhắm mắt).
+* **Thanh trượt Tinh chỉnh Độ nhạy (Real-time Sliders):**
+  * Kéo trượt điều chỉnh ngay lập tức: Ngưỡng EAR, Ngưỡng MAR, Thời gian ngủ gật (giây), Thời gian ngáp (giây).
+* **Nhật ký Sự kiện Tự động Cuộn (Event Log):**
+  * Ghi lại chi tiết thời gian và diễn biến từng lần tài xế buồn ngủ, ngủ gật (Micro-sleep) hay ngáp theo thời gian thực.

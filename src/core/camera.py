@@ -50,16 +50,14 @@ class WebcamStream:
                 self.frame = None
             return
 
-        # Làm nóng luồng (Warm-up): Đọc bỏ qua vài khung hình đầu ('Start DroidCam' splash screen)
+        # Làm nóng luồng nhanh (Fast Warm-up): Đọc 3-4 khung hình đầu để bỏ qua splash screen
         grabbed, frame = False, None
-        for _ in range(25):
+        for _ in range(4):
             ret, f = self.stream.read()
             if ret and f is not None:
                 grabbed, frame = True, f
-                # Nếu khung hình đã có độ sáng thực tế (vượt qua màn hình chờ đen 'Start DroidCam')
-                if f.mean() > 15.0:
+                if f.mean() > 10.0:
                     break
-            time.sleep(0.02)
 
         if grabbed and frame is not None:
             frame = self._transform_frame(frame)

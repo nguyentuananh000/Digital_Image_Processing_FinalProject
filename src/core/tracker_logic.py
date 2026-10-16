@@ -33,6 +33,8 @@ class DriverStatus:
     pitch_thresh: float = -15.0
     yaw_thresh: float = 28.0
     perclos: float = 0.0
+    perclos_warn_thresh: float = 0.22
+    perclos_thresh: float = 0.40
     sleep_elapsed: float = 0.0
     yawn_elapsed: float = 0.0
     nod_elapsed: float = 0.0
@@ -76,6 +78,9 @@ class DrowsinessTracker:
 
         # Lưu lịch sử (timestamp, is_eye_closed) để tính chỉ số PERCLOS
         self.eye_closure_log = deque()
+        # Lưu timestamps của các lần micro-sleep và ngáp gần nhất (cửa sổ trượt perclos_window giây)
+        self.microsleep_log = deque()
+        self.yawn_log = deque()
         # Lưu lịch sử MAR ngắn hạn (30 mẫu gần nhất) để phân biệt Nói chuyện (dao động mạnh) vs Ngáp (mở ổn định)
         self.mar_recent_window = deque(maxlen=30)
 
@@ -90,6 +95,7 @@ class DrowsinessTracker:
         self.nod_start = None
         self.yawn_start = None
         self.distract_start = None
+        self.awake_start = None
 
         self._yawn_counted_in_current_bout = False
         self.yawn_count = 0
@@ -105,6 +111,9 @@ class DrowsinessTracker:
         self.calib_pitch_data.clear()
         self.calib_yaw_data.clear()
         self.mar_recent_window.clear()
+        self.eye_closure_log.clear()
+        self.microsleep_log.clear()
+        self.yawn_log.clear()
         self.ear_filter.reset()
         self.mar_filter.reset()
         self.eye_prob_filter.reset()
@@ -114,6 +123,7 @@ class DrowsinessTracker:
         self.nod_start = None
         self.yawn_start = None
         self.distract_start = None
+        self.awake_start = None
         print("[Calibration] Bat dau hieu chuan lai tu the va mat tai xe...")
 
     def update(self, detection: DetectionResult) -> DriverStatus:
@@ -137,6 +147,15 @@ class DrowsinessTracker:
             )
 
         # 1. Lọc nhiễu tín hiệu bằng One-Euro Filter 1D
+        # Tự động đồng bộ nhanh (Fast Snap) khi tài xế mở mắt tỉnh dậy để triệt tiêu hoàn toàn độ trễ ngắt chuông
+        is_raw_eye_open = (detection.ear >= self.ear_thresh) and (
+            detection.eye_closed_prob is None or detection.eye_closed_prob < 0.38
+        )
+        if is_raw_eye_open:
+            self.ear_filter.x_prev = detection.ear
+            if detection.eye_closed_prob is not None:
+                self.eye_prob_filter.x_prev = detection.eye_closed_prob
+
         raw_ear = self.ear_filter.filter(detection.ear, now) if detection.ear > 0 else 0.0
         mar = self.mar_filter.filter(detection.mar, now) if detection.mar > 0 else 0.0
         eye_closed_prob = (
@@ -257,7 +276,23 @@ class DrowsinessTracker:
         distract_elapsed = 0.0
 
         # A. Kiểm tra Nhắm mắt / Chớp mắt / Micro-sleep / Ngủ gật
-        if is_eye_closed:
+        if not is_eye_closed:
+            if self.awake_start is None:
+                self.awake_start = now
+            awake_duration = now - self.awake_start
+
+            if self.sleep_start is not None:
+                bout_duration = now - self.sleep_start
+                if 0.08 <= bout_duration <= 0.45:
+                    self.blink_count += 1
+                elif 0.75 <= bout_duration < self.sleep_time:
+                    self.microsleep_count += 1
+                    self.microsleep_log.append(now)
+            self.sleep_start = None
+        else:
+            self.awake_start = None
+            awake_duration = 0.0
+
             if self.sleep_start is None:
                 self.sleep_start = now
             sleep_elapsed = now - self.sleep_start
@@ -269,14 +304,6 @@ class DrowsinessTracker:
                 status_text = "CHU Y: CHOP MAT LAU (MICRO-SLEEP)!"
                 status_color = (0, 140, 255)
                 alert_level = max(alert_level, 1)
-        else:
-            if self.sleep_start is not None:
-                bout_duration = now - self.sleep_start
-                if 0.08 <= bout_duration <= 0.45:
-                    self.blink_count += 1
-                elif 0.75 <= bout_duration < self.sleep_time:
-                    self.microsleep_count += 1
-            self.sleep_start = None
 
         # B. Kiểm tra Gục đầu (Pitch)
         if detection.pitch is not None and pitch < self.pitch_thresh:
@@ -319,6 +346,7 @@ class DrowsinessTracker:
                 is_yawning = True
                 if not self._yawn_counted_in_current_bout:
                     self.yawn_count += 1
+                    self.yawn_log.append(now)
                     self._yawn_counted_in_current_bout = True
                 if alert_level < 2:
                     status_text = "CHU Y: TAI XE DANG NGAP!"
@@ -329,26 +357,54 @@ class DrowsinessTracker:
             self.yawn_start = None
             self._yawn_counted_in_current_bout = False
 
-        # E. Kiểm tra mệt mỏi tích lũy qua PERCLOS & Micro-sleep
-        if alert_level < 2:
-            if perclos >= self.perclos_thresh or self.microsleep_count >= 3:
-                status_text = "CANH BAO: MET MOI NGHIEM TRONG!"
+        # Dọn dẹp nhật ký cửa sổ trượt (perclos_window = 60 giây)
+        while self.microsleep_log and (now - self.microsleep_log[0]) > self.perclos_window:
+            self.microsleep_log.popleft()
+        while self.yawn_log and (now - self.yawn_log[0]) > self.perclos_window:
+            self.yawn_log.popleft()
+
+        recent_microsleeps = len(self.microsleep_log)
+        recent_yawns = len(self.yawn_log)
+
+        # E. Kiểm tra mệt mỏi tích lũy qua PERCLOS & Micro-sleep gần đây
+        # NGUYÊN TẮC AN TOÀN TRỌNG YẾU:
+        # Còi báo động khẩn cấp Cấp độ 2 (alarm.wav) CHỈ kêu khi tài xế ĐANG NHẮM MẮT hoặc ĐANG GỤC ĐẦU.
+        # Khi tài xế đã tỉnh ngủ (mắt mở, đầu thẳng): CÒI KHẨN CẤP PHẢI DỪNG NGAY LẬP TỨC.
+        has_critical_fatigue = (perclos >= self.perclos_thresh) or (recent_microsleeps >= 3)
+        has_warning_fatigue = (perclos >= self.perclos_warn_thresh) or (recent_yawns >= 3)
+
+        if has_critical_fatigue:
+            if is_eye_closed and sleep_elapsed >= 0.5:
+                # Đang có biểu hiện mệt mỏi tích lũy mà lại đang nhắm mắt -> Báo động khẩn cấp Cấp độ 2
+                status_text = "CANH BAO: NGU GAT (MET MOI CAO)!"
                 status_color = (0, 0, 255)
                 alert_level = 2
-            elif perclos >= self.perclos_warn_thresh or self.yawn_count >= 3:
-                if alert_level == 0:
-                    status_text = "NHAC NHO: DAU HIEU MET MOI!"
-                    status_color = (0, 200, 255)
-                    alert_level = 1
+            elif alert_level < 2:
+                # Tài xế đã tỉnh ngủ / mắt đang mở: Chỉ nhắc nhở Cấp độ 1, dừng ngay còi hú cấp 2
+                if awake_duration < 4.0:
+                    status_text = "NHAC NHO: TAI XE MET MOI (HAY NGHI NGOI)!"
+                    status_color = (0, 140, 255)
+                    alert_level = max(alert_level, 1)
+                else:
+                    # Đã mở mắt tỉnh táo liên tục > 4.0 giây: Hạ về an toàn, hiển thị nhắc nhở nhẹ trên HUD
+                    status_text = "TINH TAO (CHU Y: PERCLOS CAO)"
+                    status_color = (0, 255, 0)
+                    alert_level = 0
+        elif has_warning_fatigue and alert_level == 0:
+            if awake_duration < 3.0:
+                status_text = "NHAC NHO: DAU HIEU MET MOI!"
+                status_color = (0, 200, 255)
+                alert_level = 1
 
         # Tính thanh tiến trình nguy hiểm (Danger Progress Bar 0.0 -> 1.0)
+        fatigue_prog = (perclos / max(0.1, self.perclos_thresh)) if is_eye_closed or awake_duration < 4.0 else (perclos / max(0.1, self.perclos_thresh)) * 0.5
         danger_progress = min(
             1.0,
             max(
                 sleep_elapsed / max(0.1, self.sleep_time),
                 nod_elapsed / max(0.1, self.nod_time),
                 distract_elapsed / max(0.1, self.distraction_time),
-                perclos / max(0.1, self.perclos_thresh),
+                fatigue_prog,
             ),
         )
 
@@ -374,6 +430,8 @@ class DrowsinessTracker:
             pitch_thresh=self.pitch_thresh,
             yaw_thresh=self.yaw_thresh,
             perclos=perclos,
+            perclos_warn_thresh=self.perclos_warn_thresh,
+            perclos_thresh=self.perclos_thresh,
             sleep_elapsed=sleep_elapsed,
             yawn_elapsed=yawn_elapsed,
             nod_elapsed=nod_elapsed,

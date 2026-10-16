@@ -18,6 +18,7 @@ class DMSVisualizer:
         fps: float,
         dip_info: Optional[DIPDiagnostics] = None,
         cam_info: str = "",
+        show_text_overlay: bool = True,
     ) -> np.ndarray:
         h, w, _ = frame.shape
 
@@ -27,39 +28,65 @@ class DMSVisualizer:
             # Vẽ điểm mốc MediaPipe (Màu Xanh lơ / Cam) để đối chiếu trực quan với Unified YOLO
             for pts_arr in (cmp_res.left_eye, cmp_res.right_eye, cmp_res.mouth):
                 if pts_arr is not None:
-                    pts_i = pts_arr.astype(np.int32)
-                    cv2.polylines(frame, [pts_i], True, (255, 200, 0), 1)
+                    pts_i = np.round(pts_arr).astype(np.int32)
+                    cv2.polylines(frame, [pts_i], True, (255, 200, 0), 1, cv2.LINE_AA)
                     for x, y in pts_i:
                         if x > 0 and y > 0:
-                            cv2.circle(frame, (int(x), int(y)), 2, (0, 165, 255), -1)
+                            cv2.circle(frame, (int(x), int(y)), 2, (0, 165, 255), -1, cv2.LINE_AA)
 
         if detection.detected:
             if detection.bbox is not None:
-                x1, y1, x2, y2 = detection.bbox
+                x1, y1, x2, y2 = [int(round(v)) for v in detection.bbox]
                 cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 200, 0), 1)
 
             if detection.left_eye is not None:
-                pts_le = detection.left_eye.astype(np.int32)
-                cv2.polylines(frame, [pts_le], True, (0, 255, 255), 1)
+                pts_le = np.round(detection.left_eye).astype(np.int32)
+                cv2.polylines(frame, [pts_le], True, (0, 255, 255), 1, cv2.LINE_AA)
                 for x, y in pts_le:
                     if x > 0 and y > 0:
-                        cv2.circle(frame, (int(x), int(y)), 2, (0, 255, 0), -1)
+                        cv2.circle(frame, (int(x), int(y)), 2, (0, 255, 0), -1, cv2.LINE_AA)
 
             if detection.right_eye is not None:
-                pts_re = detection.right_eye.astype(np.int32)
-                cv2.polylines(frame, [pts_re], True, (0, 255, 255), 1)
+                pts_re = np.round(detection.right_eye).astype(np.int32)
+                cv2.polylines(frame, [pts_re], True, (0, 255, 255), 1, cv2.LINE_AA)
                 for x, y in pts_re:
                     if x > 0 and y > 0:
-                        cv2.circle(frame, (int(x), int(y)), 2, (0, 255, 0), -1)
+                        cv2.circle(frame, (int(x), int(y)), 2, (0, 255, 0), -1, cv2.LINE_AA)
 
             if detection.mouth is not None:
-                pts_m = detection.mouth.astype(np.int32)
-                cv2.polylines(frame, [pts_m], True, (255, 0, 255), 1)
+                pts_m = np.round(detection.mouth).astype(np.int32)
+                cv2.polylines(frame, [pts_m], True, (255, 0, 255), 1, cv2.LINE_AA)
                 for x, y in pts_m:
                     if x > 0 and y > 0:
-                        cv2.circle(frame, (int(x), int(y)), 2, (255, 100, 255), -1)
+                        cv2.circle(frame, (int(x), int(y)), 2, (255, 100, 255), -1, cv2.LINE_AA)
 
-        # 2. Bảng thông tin Sinh trắc & Cảnh báo (Góc trái trên)
+
+        # 4. Viền cảnh báo theo cấp độ (Level 1: Viền vàng/cam, Level 2: Viền đỏ dày)
+        if status.alert_level >= 2:
+            cv2.rectangle(frame, (0, 0), (w - 1, h - 1), (0, 0, 255), 6)
+        elif status.alert_level == 1:
+            cv2.rectangle(frame, (0, 0), (w - 1, h - 1), (0, 180, 255), 3)
+
+        # Nếu tắt lớp phủ chữ (như trong Dashboard GUI), chỉ vẽ thêm bảng so sánh nếu đang ở mode COMPARE
+        if not show_text_overlay:
+            if cmp_res is not None:
+                bx = w - 280
+                cv2.rectangle(frame, (bx - 5, 10), (w - 10, 180), (20, 20, 20), -1)
+                cv2.putText(frame, "SO SANH (COMPARE)", (bx, 32), cv2.FONT_HERSHEY_SIMPLEX, 0.46, (0, 255, 255), 2)
+                y_ecnn = (detection.eye_closed_prob or 0.0) * 100.0
+                m_ecnn = (cmp_res.eye_closed_prob or 0.0) * 100.0
+                rows = [
+                    f"EAR    : {detection.ear:.2f} vs {cmp_res.ear:.2f}",
+                    f"EyeCNN : {y_ecnn:2.0f}% vs {m_ecnn:2.0f}%",
+                    f"MAR    : {detection.mar:.2f} vs {cmp_res.mar:.2f}",
+                    f"Speed  : {detection.latency_ms:.0f}ms vs {cmp_res.latency_ms:.0f}ms",
+                    "Mau    : Xanh(YOLO) | Cam(MP)",
+                ]
+                for idx, r_txt in enumerate(rows):
+                    cv2.putText(frame, r_txt, (bx, 58 + idx * 22), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (220, 220, 220), 1)
+            return frame
+
+        # 2. Bảng thông tin Sinh trắc & Cảnh báo (Góc trái trên) cho chế độ CLI
         overlay = frame.copy()
         cv2.rectangle(overlay, (10, 10), (335, 245), (20, 20, 20), -1)
         if dip_info is not None:

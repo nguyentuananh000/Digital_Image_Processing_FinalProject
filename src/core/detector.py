@@ -8,6 +8,25 @@ import numpy as np
 
 from .math_utils import calculate_ear, combine_bino_ear, calculate_mar, get_head_pose, estimate_pose_from_16kpts
 from .eye_classifier import EyeStateClassifier
+from .image_processing import PointsOneEuroFilter
+
+
+class LandmarkFilterSet:
+    """Tập hợp bộ lọc thích ứng One-Euro Filter 2D cho mắt, miệng, góc quay đầu và bounding box."""
+
+    def __init__(self, min_cutoff: float = 0.7, beta: float = 0.04):
+        self.left_eye = PointsOneEuroFilter(min_cutoff=min_cutoff, beta=beta, max_jump=80.0)
+        self.right_eye = PointsOneEuroFilter(min_cutoff=min_cutoff, beta=beta, max_jump=80.0)
+        self.mouth = PointsOneEuroFilter(min_cutoff=min_cutoff, beta=beta, max_jump=80.0)
+        self.head_pose = PointsOneEuroFilter(min_cutoff=0.5, beta=0.03, max_jump=80.0)
+        self.bbox = PointsOneEuroFilter(min_cutoff=0.5, beta=0.02, max_jump=160.0)
+
+    def reset(self):
+        self.left_eye.reset()
+        self.right_eye.reset()
+        self.mouth.reset()
+        self.head_pose.reset()
+        self.bbox.reset()
 
 
 @dataclass
@@ -65,25 +84,44 @@ class FaceLandmarkDetector:
             weights_path=eye_classifier_weights,
             unified_path=unified_weights,
         )
+        self._last_face_ts = 0.0
+        self._rescue_counter = 0
+        self._is_loading_yolo = False
+        self._mp_filters = LandmarkFilterSet(min_cutoff=0.7, beta=0.04)
+        self._yolo_filters = LandmarkFilterSet(min_cutoff=0.7, beta=0.04)
         self.set_backend(self.backend)
 
+    def reset_filters(self):
+        """Khôi phục trạng thái bộ lọc chống rung khi chuyển cảnh hoặc mất dấu khuôn mặt."""
+        self._mp_filters.reset()
+        self._yolo_filters.reset()
+
     def _ensure_yolo_loaded(self):
-        if self.primary_model is not None:
+        if self.primary_model is not None or self._is_loading_yolo:
             return
-        import torch
-        from ultralytics import YOLO
+        self._is_loading_yolo = True
+        try:
+            import torch
+            from ultralytics import YOLO
 
-        if not torch.cuda.is_available():
-            torch.set_num_threads(4)
+            if not torch.cuda.is_available():
+                torch.set_num_threads(4)
 
-        if not os.path.exists(self.unified_weights):
-            raise FileNotFoundError(f"Khong tim thay file trong so YOLO tai: {self.unified_weights}")
+            if not os.path.exists(self.unified_weights):
+                print(f"[Detector] Khong tim thay file trong so YOLO: {self.unified_weights}")
+                return
 
-        print(f"[Detector] Dang tai model YOLO: {self.unified_weights} (imgsz={self.imgsz})")
-        self.primary_model = YOLO(self.unified_weights)
-        self.primary_name = os.path.basename(self.unified_weights)
-        dummy = np.zeros((self.imgsz, self.imgsz, 3), dtype=np.uint8)
-        self.primary_model(dummy, imgsz=self.imgsz, verbose=False)
+            print(f"[Detector] Dang nap model YOLO: {self.unified_weights} (imgsz={self.imgsz})")
+            model = YOLO(self.unified_weights)
+            dummy = np.zeros((self.imgsz, self.imgsz, 3), dtype=np.uint8)
+            model(dummy, imgsz=self.imgsz, verbose=False)
+            self.primary_name = os.path.basename(self.unified_weights)
+            self.primary_model = model
+            print("[Detector] Model YOLO da san sang ho tro cuu ho.")
+        except Exception as e:
+            print(f"[CANH BAO] Khong the nap model YOLO: {e}")
+        finally:
+            self._is_loading_yolo = False
 
     def _ensure_mediapipe_loaded(self):
         if self.face_mesh is not None:
@@ -143,6 +181,7 @@ class FaceLandmarkDetector:
         else:
             raise ValueError(f"Backend khong hop le: {backend}. Chon 'mediapipe', 'unified', hoac 'compare'.")
         self.backend = b
+        self.reset_filters()
 
     def _extract_yolo_single(self, model, frame: np.ndarray):
         """Trích xuất bbox (x1,y1,x2,y2), conf, tọa độ 16 điểm (16,2) và độ tự tin từng điểm (16,) từ model YOLO."""
@@ -190,6 +229,7 @@ class FaceLandmarkDetector:
             mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=image_rgb)
             results = self.face_mesh.detect(mp_image)
             if not results.face_landmarks:
+                self._mp_filters.reset()
                 return DetectionResult(detected=False, model_source="MediaPipe", latency_ms=(time.perf_counter() - t0) * 1000.0)
             landmarks_list = results.face_landmarks[0]
             if getattr(results, "face_blendshapes", None) and len(results.face_blendshapes) > 0:
@@ -199,17 +239,32 @@ class FaceLandmarkDetector:
         else:
             results = self.face_mesh.process(image_rgb)
             if not results.multi_face_landmarks:
+                self._mp_filters.reset()
                 return DetectionResult(detected=False, model_source="MediaPipe", latency_ms=(time.perf_counter() - t0) * 1000.0)
             landmarks_list = results.multi_face_landmarks[0].landmark
 
-        lm = [(int(pt.x * w), int(pt.y * h)) for pt in landmarks_list]
+        # Trích xuất tọa độ điểm mốc thực (sub-pixel float32) - không làm tròn int sớm
+        lm = [(float(pt.x * w), float(pt.y * h)) for pt in landmarks_list]
 
-        left_eye = np.array([lm[i] for i in self.LEFT_EYE_MP_IDX], dtype=np.float32)
-        right_eye = np.array([lm[i] for i in self.RIGHT_EYE_MP_IDX], dtype=np.float32)
-        mouth = np.array([lm[i] for i in self.MOUTH_MP_IDX], dtype=np.float32)
+        left_eye_raw = np.array([lm[i] for i in self.LEFT_EYE_MP_IDX], dtype=np.float32)
+        right_eye_raw = np.array([lm[i] for i in self.RIGHT_EYE_MP_IDX], dtype=np.float32)
+        mouth_raw = np.array([lm[i] for i in self.MOUTH_MP_IDX], dtype=np.float32)
+        image_pts_raw = np.array([lm[i] for i in self.HEAD_POSE_MP_IDX], dtype=np.float32)
 
-        image_pts = np.array([lm[i] for i in self.HEAD_POSE_MP_IDX], dtype="double")
-        pitch, yaw, roll = get_head_pose(frame.shape, image_pts)
+        xs = [p[0] for p in lm]
+        ys = [p[1] for p in lm]
+        bbox_raw = np.array([min(xs), min(ys), max(xs), max(ys)], dtype=np.float32)
+
+        # Lọc khử rung One-Euro Filter 2D đa chiều cho điểm mốc và bounding box
+        t_now = time.perf_counter()
+        left_eye = self._mp_filters.left_eye.filter(left_eye_raw, t_now)
+        right_eye = self._mp_filters.right_eye.filter(right_eye_raw, t_now)
+        mouth = self._mp_filters.mouth.filter(mouth_raw, t_now)
+        image_pts = self._mp_filters.head_pose.filter(image_pts_raw, t_now)
+        bbox_f = self._mp_filters.bbox.filter(bbox_raw, t_now)
+        bbox = (int(round(bbox_f[0])), int(round(bbox_f[1])), int(round(bbox_f[2])), int(round(bbox_f[3])))
+
+        pitch, yaw, roll = get_head_pose(frame.shape, image_pts.astype("double"))
 
         ear = combine_bino_ear(calculate_ear(left_eye), calculate_ear(right_eye), yaw=yaw or 0.0)
         mar = calculate_mar(mouth)
@@ -221,9 +276,6 @@ class FaceLandmarkDetector:
         else:
             eye_closed_prob = cnn_prob if cnn_prob is not None else mp_blink_prob
 
-        xs = [p[0] for p in lm]
-        ys = [p[1] for p in lm]
-        bbox = (min(xs), min(ys), max(xs), max(ys))
         dt_ms = (time.perf_counter() - t0) * 1000.0
 
         return DetectionResult(
@@ -247,6 +299,7 @@ class FaceLandmarkDetector:
         t0 = time.perf_counter()
         out = self._extract_yolo_single(self.primary_model, frame)
         if out is None:
+            self._yolo_filters.reset()
             return DetectionResult(
                 detected=False,
                 model_source=self.primary_name,
@@ -265,17 +318,29 @@ class FaceLandmarkDetector:
 
         elif self.backend == "mediapipe":
             res_mp = self._process_mediapipe(frame)
-            if not res_mp.detected:
-                # Bọc lót tự động (Smart Fallback): Khi tài xế gục sâu hoặc quay đầu mạnh khiến MediaPipe mất dấu,
-                # tự động gọi model YOLOv8-Pose đã train (dms_unified.pt) vào cứu hộ ngay lập tức!
-                try:
-                    self._ensure_yolo_loaded()
-                    res_fb = self._process_yolo_primary(frame)
-                    if res_fb.detected:
-                        res_fb.model_source = f"YOLO-Rescue({self.primary_name})"
-                        return res_fb
-                except Exception:
-                    pass
+            if res_mp.detected:
+                self._last_face_ts = time.perf_counter()
+                return res_mp
+
+            # Bọc lót tự động (Smart Fallback):
+            # Chỉ kích hoạt cứu hộ khi tài xế vừa xuất hiện trước đó (< 2.0s) rồi đột ngột gục sâu / che mặt
+            now = time.perf_counter()
+            if (now - self._last_face_ts) < 2.0:
+                if self.primary_model is not None:
+                    self._rescue_counter += 1
+                    # Điều tiết tần suất chạy YOLO cứu hộ (chạy cách 1 frame) để giữ FPS mượt mà
+                    if self._rescue_counter % 2 == 0:
+                        try:
+                            res_fb = self._process_yolo_primary(frame)
+                            if res_fb.detected:
+                                res_fb.model_source = f"YOLO-Rescue({self.primary_name})"
+                                return res_fb
+                        except Exception:
+                            pass
+                elif not self._is_loading_yolo:
+                    # Nạp YOLO ở luồng ngầm riêng để không làm khựng video
+                    Thread(target=self._ensure_yolo_loaded, daemon=True).start()
+
             return res_mp
 
         elif self.backend == "compare":
@@ -298,9 +363,21 @@ class FaceLandmarkDetector:
         source_name: str,
     ) -> DetectionResult:
         """Tạo DetectionResult từ 16 điểm mốc YOLOv8-Pose + Tầng 2 Eye CNN."""
-        left_eye = pts_xy[0:6]
-        right_eye = pts_xy[6:12]
-        mouth = pts_xy[12:16]
+        t_now = time.perf_counter()
+
+        left_eye_raw = pts_xy[0:6].astype(np.float32)
+        right_eye_raw = pts_xy[6:12].astype(np.float32)
+        mouth_raw = pts_xy[12:16].astype(np.float32)
+
+        left_eye = self._yolo_filters.left_eye.filter(left_eye_raw, t_now)
+        right_eye = self._yolo_filters.right_eye.filter(right_eye_raw, t_now)
+        mouth = self._yolo_filters.mouth.filter(mouth_raw, t_now)
+
+        filtered_bbox = bbox
+        if bbox is not None:
+            bbox_raw = np.array(bbox, dtype=np.float32)
+            bbox_f = self._yolo_filters.bbox.filter(bbox_raw, t_now)
+            filtered_bbox = (int(round(bbox_f[0])), int(round(bbox_f[1])), int(round(bbox_f[2])), int(round(bbox_f[3])))
 
         left_conf = float(np.mean(pts_conf[0:6]))
         right_conf = float(np.mean(pts_conf[6:12]))
@@ -308,7 +385,8 @@ class FaceLandmarkDetector:
         ear_left = calculate_ear(left_eye) if left_conf >= self.kpt_conf_threshold else 0.0
         ear_right = calculate_ear(right_eye) if right_conf >= self.kpt_conf_threshold else 0.0
 
-        pitch, yaw, roll = estimate_pose_from_16kpts(frame.shape, pts_xy, bbox)
+        pts_filtered = np.vstack([left_eye, right_eye, mouth])
+        pitch, yaw, roll = estimate_pose_from_16kpts(frame.shape, pts_filtered, filtered_bbox)
         avg_ear = combine_bino_ear(ear_left, ear_right, yaw=yaw or 0.0)
         mar = calculate_mar(mouth) if float(np.mean(pts_conf[12:16])) >= self.kpt_conf_threshold else 0.0
 
@@ -321,7 +399,7 @@ class FaceLandmarkDetector:
 
         return DetectionResult(
             detected=True,
-            bbox=bbox,
+            bbox=filtered_bbox,
             left_eye=left_eye,
             right_eye=right_eye,
             mouth=mouth,
